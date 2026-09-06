@@ -1,0 +1,2 @@
+# Package integrity hashes must match on Linux and Windows checkouts.
+* text=auto eol=lf
