@@ -1,9 +1,13 @@
 {
   "format_version": 1,
   "id": "dev.kestral.goal-chat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "display_name": "Goal Chat",
   "description": "A goal-oriented conversation that maintains an explicit goal, working solution, decisions, constraints, questions, and assumptions.",
+  "publisher": {
+    "name": "Kestral reference apps"
+  },
+  "license": "MIT",
   "icon": {
     "kind": "kestral",
     "name": "check-square"
@@ -119,7 +123,8 @@
           "list",
           "create",
           "replace",
-          "delete"
+          "delete",
+          "transaction"
         ],
         "limits": {
           "records": 1,
@@ -161,7 +166,8 @@
           "list",
           "create",
           "replace",
-          "delete"
+          "delete",
+          "transaction"
         ],
         "limits": {
           "records": 10000,
@@ -175,11 +181,5 @@
       "transaction_operations": 32
     },
     "exports": []
-  },
-  "integrity": {
-    "algorithm": "sha256",
-    "assets": {
-      "ui/index.html": "sha256-934466ef66b1fb1f57a758b5c924aad1787244784eba7d9082908f7cda36137b"
-    }
   }
 }

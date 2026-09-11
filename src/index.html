@@ -147,6 +147,7 @@
     let messages = [];
     let sending = false;
     let stateSaving = false;
+    let clearing = false;
 
     const outputSchema = {
       type: "object",
@@ -170,18 +171,21 @@
       els.status.textContent = `${prefix}: ${detail}`;
       window.appHost.reportError(`${prefix}: ${detail}`);
     }
-    function normalizeLines(value) {
-      return String(value || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 80);
+    function editorLines(value, label, maxItems) {
+      const lines = String(value || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (lines.length > maxItems) throw new Error(`${label} supports at most ${maxItems} items`);
+      if (lines.some((line) => line.length > 4000)) throw new Error(`${label} items must be at most 4,000 characters`);
+      return lines;
     }
     function currentEditorState() {
       return {
         user_goal: els["user-goal"].value.trim(),
         goal_interpretation: els["goal-interpretation"].value.trim(),
         working_solution: els["working-solution"].value.trim(),
-        open_questions: normalizeLines(els["open-questions"].value),
-        decisions: normalizeLines(els.decisions.value),
-        constraints: normalizeLines(els.constraints.value),
-        assumptions: normalizeLines(els.assumptions.value)
+        open_questions: editorLines(els["open-questions"].value, "Open questions", 40),
+        decisions: editorLines(els.decisions.value, "Decisions", 80),
+        constraints: editorLines(els.constraints.value, "Constraints", 80),
+        assumptions: editorLines(els.assumptions.value, "Assumptions", 80)
       };
     }
     function stateValue(record) {
@@ -212,6 +216,10 @@
       return record && typeof record.id === "string" && Number.isInteger(record.revision) && v &&
         (v.role === "user" || v.role === "assistant") && typeof v.content === "string" && typeof v.created_at === "string";
     }
+    function validStateRecord(record) {
+      return record && typeof record.id === "string" && Number.isInteger(record.revision) && record.revision > 0 &&
+        record.value && typeof record.value === "object";
+    }
     function renderMessages() {
       els.messages.replaceChildren();
       els.empty.hidden = messages.length !== 0;
@@ -240,36 +248,44 @@
       } while (after);
       return records;
     }
+    async function refreshFromStorage() {
+      const [states, storedMessages] = await Promise.all([listAll(STATE_COLLECTION), listAll(MESSAGE_COLLECTION)]);
+      stateRecord = states[0] || null;
+      messages = storedMessages.filter(validMessage).sort((a, b) => a.value.created_at.localeCompare(b.value.created_at));
+      fillStateEditor(stateValue(stateRecord));
+      renderMessages();
+    }
     async function load() {
       els.status.textContent = "Loading…";
       try {
-        const [states, storedMessages] = await Promise.all([listAll(STATE_COLLECTION), listAll(MESSAGE_COLLECTION)]);
-        stateRecord = states[0] || null;
-        messages = storedMessages.filter(validMessage).sort((a, b) => a.value.created_at.localeCompare(b.value.created_at));
-        fillStateEditor(stateValue(stateRecord));
-        renderMessages();
+        await refreshFromStorage();
         els.status.textContent = "";
       } catch (error) { report(error, "Could not load Goal Chat"); }
     }
     async function persistState(nextState) {
-      if (stateRecord) {
-        await window.appHost.data.v1.replace(STATE_COLLECTION, stateRecord.id, stateRecord.revision, nextState);
-      } else {
-        await window.appHost.data.v1.create(STATE_COLLECTION, nextState);
-      }
-      const states = await listAll(STATE_COLLECTION);
-      stateRecord = states[0] || null;
+      const persisted = stateRecord
+        ? await window.appHost.data.v1.replace(STATE_COLLECTION, stateRecord.id, stateRecord.revision, nextState)
+        : await window.appHost.data.v1.create(STATE_COLLECTION, nextState);
+      if (!validStateRecord(persisted)) throw new Error("Kestral returned an invalid state record after saving");
+      stateRecord = persisted;
       fillStateEditor(stateValue(stateRecord));
     }
     async function saveEditedState() {
-      if (stateSaving || sending) return;
+      if (stateSaving || sending || clearing) return;
       stateSaving = true;
       els["save-state"].disabled = true;
+      els.send.disabled = true;
+      els["composer-input"].disabled = true;
       try {
         await persistState(currentEditorState());
         els.status.textContent = "Working state saved.";
       } catch (error) { report(error, "Could not save state"); }
-      finally { stateSaving = false; els["save-state"].disabled = false; }
+      finally {
+        stateSaving = false;
+        els["save-state"].disabled = false;
+        els.send.disabled = false;
+        els["composer-input"].disabled = false;
+      }
     }
     function modelSystemPrompt() {
       return `You are the reasoning engine for Goal Chat, a goal-oriented conversation.\n\nThe transcript is historical evidence. The explicit working state is the primary orientation for the conversation. Your job on every turn is to do two things at once: (1) answer the user's latest message naturally and usefully, and (2) maintain a consolidated working state for the overall goal.\n\nRules:\n- Never claim the model interpretation is the user's exact wording. The user's stated goal is supplied separately and is user-owned.\n- goal_interpretation is your current concise interpretation of what the user is trying to achieve. Update it when the conversation materially changes or clarifies the goal.\n- working_solution is the current best consolidated result for the whole goal, not a summary of the latest reply. Preserve useful settled content and improve it incrementally.\n- open_questions contains unresolved questions that materially block or shape the goal. Remove them when resolved.\n- decisions contains settled choices. Do not silently reverse prior decisions; if the user changes one, update it explicitly.\n- constraints contains requirements and boundaries that remain relevant.\n- assumptions contains model assumptions that could be wrong and matter to the result. Remove assumptions once confirmed or disproved.\n- Lack of a state change is acceptable: preserve fields exactly when nothing relevant changed.\n- Do not manufacture decisions, constraints, or user preferences.\n- Keep state concise enough to be useful as future context.\n- The visible reply should address the latest user message directly; do not narrate these bookkeeping rules.\nReturn only data matching the requested JSON schema.`;
@@ -296,27 +312,53 @@
       if (typeof content !== "string" || !content.trim()) throw new Error("The model returned no content");
       let parsed;
       try { parsed = JSON.parse(content); } catch { throw new Error("The model returned invalid structured output"); }
-      if (!parsed || typeof parsed.reply !== "string" || !parsed.reply.trim()) throw new Error("The model returned no reply");
-      for (const key of ["goal_interpretation", "working_solution"]) if (typeof parsed[key] !== "string") throw new Error(`Invalid ${key} in model response`);
-      for (const key of ["open_questions", "decisions", "constraints", "assumptions"]) {
-        if (!Array.isArray(parsed[key]) || parsed[key].some((x) => typeof x !== "string")) throw new Error(`Invalid ${key} in model response`);
+      if (!parsed || typeof parsed.reply !== "string" || !parsed.reply.trim() || parsed.reply.trim().length > 30000) throw new Error("The model returned an invalid reply");
+      for (const [key, maxLength] of [["goal_interpretation", 12000], ["working_solution", 60000]]) {
+        if (typeof parsed[key] !== "string" || parsed[key].length > maxLength) throw new Error(`Invalid ${key} in model response`);
+      }
+      for (const [key, maxItems] of [["open_questions", 40], ["decisions", 80], ["constraints", 80], ["assumptions", 80]]) {
+        if (!Array.isArray(parsed[key]) || parsed[key].length > maxItems || parsed[key].some((x) => typeof x !== "string" || x.length > 4000)) {
+          throw new Error(`Invalid ${key} in model response`);
+        }
       }
       return parsed;
     }
     async function createMessage(role, content) {
-      await window.appHost.data.v1.create(MESSAGE_COLLECTION, { role, content, created_at: new Date().toISOString() });
+      const created = await window.appHost.data.v1.create(MESSAGE_COLLECTION, { role, content, created_at: new Date().toISOString() });
+      if (!validMessage(created)) throw new Error("Kestral returned an invalid message record after saving");
+      return created;
+    }
+    async function persistCompletedTurn(nextState, reply) {
+      const stateOperation = stateRecord
+        ? { kind: "replace", collection: STATE_COLLECTION, id: stateRecord.id, expectedRevision: stateRecord.revision, value: nextState }
+        : { kind: "create", collection: STATE_COLLECTION, value: nextState };
+      const persisted = await window.appHost.data.v1.transaction([
+        stateOperation,
+        { kind: "create", collection: MESSAGE_COLLECTION, value: { role: "assistant", content: reply, created_at: new Date().toISOString() } }
+      ]);
+      if (!Array.isArray(persisted) || persisted.length !== 2 || !validStateRecord(persisted[0]) || !validMessage(persisted[1])) {
+        throw new Error("Kestral returned an invalid completed-turn transaction result");
+      }
+      stateRecord = persisted[0];
+      messages = [...messages, persisted[1]].sort((a, b) => a.value.created_at.localeCompare(b.value.created_at));
+      fillStateEditor(stateValue(stateRecord));
+      renderMessages();
     }
     async function sendMessage(text) {
       const content = text.trim();
-      if (!content || sending) return false;
+      if (!content || sending || stateSaving || clearing) return false;
       sending = true;
       els.send.disabled = true;
       els["composer-input"].disabled = true;
+      els["save-state"].disabled = true;
       try {
-        await createMessage("user", content);
-        const loadedMessages = await listAll(MESSAGE_COLLECTION);
-        messages = loadedMessages.filter(validMessage).sort((a, b) => a.value.created_at.localeCompare(b.value.created_at));
-        renderMessages();
+        const lastMessage = messages.at(-1);
+        const retryingUnansweredMessage = lastMessage?.value.role === "user" && lastMessage.value.content === content;
+        if (!retryingUnansweredMessage) {
+          const userMessage = await createMessage("user", content);
+          messages = [...messages, userMessage].sort((a, b) => a.value.created_at.localeCompare(b.value.created_at));
+          renderMessages();
+        }
 
         let before = currentEditorState();
         if (!before.user_goal && messages.filter((m) => m.value.role === "user").length === 1) {
@@ -349,44 +391,68 @@
           constraints: result.constraints.map((x) => x.trim()).filter(Boolean),
           assumptions: result.assumptions.map((x) => x.trim()).filter(Boolean)
         };
-        await persistState(nextState);
-        await createMessage("assistant", result.reply.trim());
-        const refreshed = await listAll(MESSAGE_COLLECTION);
-        messages = refreshed.filter(validMessage).sort((a, b) => a.value.created_at.localeCompare(b.value.created_at));
-        renderMessages();
+        await persistCompletedTurn(nextState, result.reply.trim());
         els.status.textContent = "";
         return true;
       } catch (error) {
-        report(error, "Could not complete this turn; your message was kept and working state was not replaced");
+        try {
+          await refreshFromStorage();
+          report(error, "Could not complete this turn; stored data was reloaded. If the latest message remains unanswered, send the same message again to retry without duplicating it");
+        } catch (reloadError) {
+          report(new AggregateError([error, reloadError], `${errorText(error)}; reloading stored data also failed: ${errorText(reloadError)}`), "Could not complete this turn");
+        }
         return false;
       } finally {
         sending = false;
         els.send.disabled = false;
         els["composer-input"].disabled = false;
+        els["save-state"].disabled = false;
       }
     }
-    async function clearCollection(collection) {
-      const records = await listAll(collection);
-      for (const record of records) await window.appHost.data.v1.delete(collection, record.id, record.revision);
+    async function clearConversationRecords() {
+      const [storedMessages, states] = await Promise.all([listAll(MESSAGE_COLLECTION), listAll(STATE_COLLECTION)]);
+      const operations = [...storedMessages.map((record) => ({
+        kind: "delete", collection: MESSAGE_COLLECTION, id: record.id, expectedRevision: record.revision
+      })), ...states.map((record) => ({
+        kind: "delete", collection: STATE_COLLECTION, id: record.id, expectedRevision: record.revision
+      }))];
+      for (let offset = 0; offset < operations.length; offset += 32) {
+        await window.appHost.data.v1.transaction(operations.slice(offset, offset + 32));
+      }
     }
     async function newConversation() {
-      if (sending || stateSaving) return;
+      if (sending || stateSaving || clearing) return;
       if (messages.length > 0 || stateRecord) {
         const ok = window.confirm("Start a new conversation? This clears this Goal Chat conversation and its working state.");
         if (!ok) return;
       }
+      clearing = true;
       els["new-conversation"].disabled = true;
+      els.send.disabled = true;
+      els["composer-input"].disabled = true;
+      els["save-state"].disabled = true;
       try {
-        await clearCollection(MESSAGE_COLLECTION);
-        await clearCollection(STATE_COLLECTION);
+        await clearConversationRecords();
         stateRecord = null;
         messages = [];
         fillStateEditor(cloneEmptyState());
         renderMessages();
         els.status.textContent = "New conversation started.";
         els["composer-input"].focus();
-      } catch (error) { report(error, "Could not start a new conversation"); }
-      finally { els["new-conversation"].disabled = false; }
+      } catch (error) {
+        try {
+          await refreshFromStorage();
+          report(error, "Conversation clearing stopped before completion; stored data was reloaded. Choose New conversation again to finish clearing");
+        } catch (reloadError) {
+          report(new AggregateError([error, reloadError], "clearing and reload both failed"), "Could not start a new conversation or reload its stored data");
+        }
+      } finally {
+        clearing = false;
+        els["new-conversation"].disabled = false;
+        els.send.disabled = false;
+        els["composer-input"].disabled = false;
+        els["save-state"].disabled = false;
+      }
     }
 
     els["composer-form"].addEventListener("submit", async (event) => {
