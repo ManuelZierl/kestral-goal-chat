@@ -1,7 +1,24 @@
 {
   "name": "kestral-goal-chat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test" }
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19 <23"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check scripts/build.mjs && node --check scripts/package-digest.mjs && node --check scripts/release-evidence.mjs",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:package-schema": "node test/package-schema.mjs",
+    "test:package-digest": "node --test test/package-digest.test.mjs",
+    "test:reproducible": "node test/reproducible.mjs",
+    "test:release-evidence": "node --test test/release-evidence.test.mjs",
+    "package:digest": "node scripts/package-digest.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "jsdom": "^29.1.1"
+  }
 }
