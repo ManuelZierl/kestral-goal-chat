@@ -60,6 +60,10 @@ git diff --exit-code -- dist
 
 CI runs package, behavior, schema, digest, reproducibility, audit, and clean-source checks on Linux and Windows. Runtime tests use a fake host-managed-data boundary; they do not claim to replace real Kestral/Tauri lifecycle testing. See [RELEASE-EVIDENCE.md](RELEASE-EVIDENCE.md) for the required manual release process.
 
+## Maintenance and support
+
+Manuel Zierl maintains this repository. Report ordinary defects through [GitHub Issues](https://github.com/ManuelZierl/kestral-goal-chat/issues) and security-sensitive defects through [private vulnerability reporting](https://github.com/ManuelZierl/kestral-goal-chat/security/advisories/new).
+
 ## Origin and license
 
 Extracted from [Kestral PR #3](https://github.com/ManuelZierl/kestral/pull/3), directory `reference-apps/goal-chat`, at source commit `ce1c6dc1f77f89c14d742f24482aed633931f640`.
